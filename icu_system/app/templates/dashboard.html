@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+
+{% block title %}Dashboard - ICU System{% endblock %}
+
+{% block content %}
+<h1>Doctor Dashboard</h1>
+
+<form method="GET" action="{{ url_for('patients.patient_search') }}" class="search-bar">
+    <input type="text" name="q" placeholder="Search patient ID, name, or diagnosis">
+    <button type="submit">Search</button>
+</form>
+
+{% if stats %}
+<div class="stats-grid">
+    <div class="card"><h3>Total Patients</h3><p>{{ stats.total_patients }}</p></div>
+    {% for status, count in stats.status_breakdown.items() %}
+        <div class="card"><h3>{{ status }}</h3><p>{{ count }}</p></div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Age</th>
+                <th>Gender</th>
+                <th>Status</th>
+                <th>Latest HR</th>
+                <th>Latest SpO₂</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for patient in patients %}
+            {% set vital = latest_vitals.get(patient.patientunitstayid) %}
+            <tr>
+                <td>{{ patient.patientunitstayid }}</td>
+                <td>{{ patient.patient_name or 'N/A' }}</td>
+                <td>{{ patient.age }}</td>
+                <td>{{ patient.gender }}</td>
+                <td>{{ patient.unitdischargestatus or 'Unknown' }}</td>
+                <td>{{ vital.heartrate if vital else 'N/A' }}</td>
+                <td>{{ vital.spo2 if vital else 'N/A' }}</td>
+                <td><a href="{{ url_for('patients.detail', patient_id=patient.patientunitstayid) }}">View</a></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="8">No patients found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
