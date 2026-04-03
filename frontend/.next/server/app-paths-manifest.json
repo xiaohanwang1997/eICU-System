@@ -1,8 +1,0 @@
-{
-  "/patients/page": "app/patients/page.js",
-  "/admin/page": "app/admin/page.js",
-  "/dashboard/page": "app/dashboard/page.js",
-  "/patients/[id]/diagnosis/page": "app/patients/[id]/diagnosis/page.js",
-  "/patients/[id]/notes/page": "app/patients/[id]/notes/page.js",
-  "/patients/[id]/vitals/page": "app/patients/[id]/vitals/page.js"
-}
