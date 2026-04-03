@@ -1,0 +1,85 @@
+{% extends 'base.html' %}
+
+{% block title %}Patient {{ patient.patientunitstayid }} - ICU System{% endblock %}
+
+{% block content %}
+<h1>Patient Detail</h1>
+<div class="grid-two">
+    <div class="card">
+        <h2>Overview</h2>
+        <p><strong>ID:</strong> {{ patient.patientunitstayid }}</p>
+        <p><strong>Name:</strong> {{ patient.patient_name or 'N/A' }}</p>
+        <p><strong>Age:</strong> {{ patient.age }}</p>
+        <p><strong>Gender:</strong> {{ patient.gender }}</p>
+        <p><strong>Diagnosis:</strong> {{ patient.diagnosis_summary or 'N/A' }}</p>
+        <p><strong>Status:</strong> {{ patient.unitdischargestatus or 'Unknown' }}</p>
+    </div>
+
+    <div class="card">
+        <h2>Vital Trends</h2>
+        <canvas id="vitalsChart"></canvas>
+    </div>
+</div>
+
+<div class="grid-two">
+    <div class="card">
+        <h2>Medications</h2>
+        <ul>
+            {% for med in medications %}
+                <li>{{ med.drugname }} - {{ med.dosage }} - {{ med.routeadmin }} - {{ med.frequency }}</li>
+            {% else %}
+                <li>No medication records.</li>
+            {% endfor %}
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>Labs</h2>
+        <ul>
+            {% for lab in labs[:10] %}
+                <li>{{ lab.labname }}: {{ lab.labresult }} {{ lab.labmeasurenamesystem }}</li>
+            {% else %}
+                <li>No lab records.</li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Clinical Notes</h2>
+    <ul>
+        {% for note in notes %}
+            <li>{{ note.notetext }}</li>
+        {% else %}
+            <li>No notes yet.</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+fetch("{{ url_for('patients.vitals_api', patient_id=patient.patientunitstayid) }}")
+  .then(response => response.json())
+  .then(data => {
+    const labels = data.map(item => item.offset);
+    const heartRate = data.map(item => item.heartrate);
+    const spo2 = data.map(item => item.spo2);
+
+    new Chart(document.getElementById('vitalsChart'), {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [
+          { label: 'Heart Rate', data: heartRate },
+          { label: 'SpO₂', data: spo2 }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false
+      }
+    });
+  });
+</script>
+{% endblock %}
