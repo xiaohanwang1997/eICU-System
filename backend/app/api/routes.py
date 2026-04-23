@@ -9,7 +9,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.services.patient_service import get_patients, get_patient_detail
+from app.services.patient_service import (
+    add_medication_override,
+    get_patients,
+    get_patient_detail,
+    stop_medication,
+)
 from app.services.agent_service import stream_agent_response
 
 router = APIRouter()
@@ -77,6 +82,56 @@ def patient_detail(patient_id: int, db: Session = Depends(get_db)):
     if patient is None:
         raise HTTPException(status_code=404, detail="Patient not found")
     return patient
+
+
+# ---------------------------------------------------------------------------
+# Drug management (overlay on top of eICU medication table)
+# ---------------------------------------------------------------------------
+
+
+class AddMedicationRequest(BaseModel):
+    name: str
+    dosage: str | None = None
+    schedule: str | None = None
+
+
+@router.post("/patients/{patient_id}/medications")
+def add_medication(patient_id: int, body: AddMedicationRequest, db: Session = Depends(get_db)):
+    patient = get_patient_detail(db, patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="Medication name is required")
+
+    add_medication_override(
+        db,
+        patientunitstayid=patient_id,
+        name=body.name.strip(),
+        dosage=(body.dosage.strip() if body.dosage else None),
+        schedule=(body.schedule.strip() if body.schedule else None),
+    )
+    # Return refreshed patient so frontend can update tables easily
+    return get_patient_detail(db, patient_id)
+
+
+def _discontinue_medication(patient_id: int, medication_id: int, db: Session) -> dict:
+    patient = get_patient_detail(db, patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    stop_medication(db, patientunitstayid=patient_id, medication_id=medication_id)
+    return get_patient_detail(db, patient_id)
+
+
+@router.post("/patients/{patient_id}/medications/{medication_id}/discontinue")
+def discontinue_medication_route(patient_id: int, medication_id: int, db: Session = Depends(get_db)):
+    return _discontinue_medication(patient_id, medication_id, db)
+
+
+# Backward-compatible alias (older clients)
+@router.post("/patients/{patient_id}/medications/{medication_id}/stop")
+def stop_medication_route(patient_id: int, medication_id: int, db: Session = Depends(get_db)):
+    return _discontinue_medication(patient_id, medication_id, db)
 
 
 # ---------------------------------------------------------------------------

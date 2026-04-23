@@ -71,6 +71,144 @@ def _row_to_dict(row) -> dict:
         return dict(row._mapping)
     return dict(row)
 
+def _ensure_drug_management_tables(db: Session) -> None:
+    # These tables hold clinician-entered orders / actions as an overlay on top
+    # of the immutable eICU dataset tables.
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS medication_overrides (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              patientunitstayid INTEGER NOT NULL,
+              name TEXT NOT NULL,
+              dosage TEXT,
+              schedule TEXT,
+              status TEXT NOT NULL DEFAULT 'Active',
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+    )
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS medication_stops (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              patientunitstayid INTEGER NOT NULL,
+              medicationid INTEGER NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              UNIQUE(patientunitstayid, medicationid)
+            )
+            """
+        )
+    )
+    db.commit()
+
+
+def add_medication_override(
+    db: Session, *, patientunitstayid: int, name: str, dosage: str | None, schedule: str | None
+) -> dict:
+    _ensure_drug_management_tables(db)
+    res = db.execute(
+        text(
+            """
+            INSERT INTO medication_overrides (patientunitstayid, name, dosage, schedule, status)
+            VALUES (:pid, :name, :dosage, :schedule, 'Active')
+            """
+        ),
+        {"pid": patientunitstayid, "name": name, "dosage": dosage, "schedule": schedule},
+    )
+    db.commit()
+    new_id = int(getattr(res, "lastrowid", 0) or 0)
+    return {
+        "id": 1000000000 + new_id,  # avoid collisions with eICU medicationid
+        "name": name,
+        "dosage": dosage or "—",
+        "schedule": schedule or "—",
+        "status": "Active",
+        "_source": "override",
+    }
+
+
+def stop_medication(db: Session, *, patientunitstayid: int, medication_id: int) -> None:
+    """
+    Stops either:
+    - an override medication (encoded as 1_000_000_000 + overrides.id), OR
+    - a base eICU medication.medicationid (stored in medication_stops).
+    """
+    _ensure_drug_management_tables(db)
+    if medication_id >= 1000000000:
+        override_id = medication_id - 1000000000
+        db.execute(
+            text(
+                """
+                UPDATE medication_overrides
+                SET status = 'Discontinued'
+                WHERE id = :oid AND patientunitstayid = :pid
+                """
+            ),
+            {"oid": override_id, "pid": patientunitstayid},
+        )
+        db.commit()
+        return
+
+    db.execute(
+        text(
+            """
+            INSERT OR IGNORE INTO medication_stops (patientunitstayid, medicationid)
+            VALUES (:pid, :mid)
+            """
+        ),
+        {"pid": patientunitstayid, "mid": medication_id},
+    )
+    db.commit()
+
+
+def _get_stopped_base_medication_ids(db: Session, pid: int) -> set[int]:
+    _ensure_drug_management_tables(db)
+    rows = db.execute(
+        text(
+            """
+            SELECT medicationid
+            FROM medication_stops
+            WHERE patientunitstayid = :pid
+            """
+        ),
+        {"pid": pid},
+    ).fetchall()
+    return {int(r[0]) for r in rows if r and r[0] is not None}
+
+
+def _get_medication_overrides(db: Session, pid: int) -> list[dict]:
+    _ensure_drug_management_tables(db)
+    rows = db.execute(
+        text(
+            """
+            SELECT id, name, dosage, schedule, status
+            FROM medication_overrides
+            WHERE patientunitstayid = :pid
+            ORDER BY id DESC
+            LIMIT 50
+            """
+        ),
+        {"pid": pid},
+    ).fetchall()
+    result: list[dict] = []
+    for r in rows:
+        d = _row_to_dict(r)
+        oid = int(d.get("id") or 0)
+        result.append(
+            {
+                "id": 1000000000 + oid,
+                "name": str(d.get("name") or "").strip(),
+                "dosage": str(d.get("dosage") or "—"),
+                "schedule": str(d.get("schedule") or "—"),
+                "status": str(d.get("status") or "Active"),
+                "_source": "override",
+            }
+        )
+    return result
+
 
 # ---------------------------------------------------------------------------
 # Patient list  (GET /api/patients)
@@ -264,15 +402,21 @@ def get_patient_detail(db: Session, pid: int) -> dict | None:
         LIMIT 20
     """), {"pid": pid}).fetchall()
     medications = []
+    stopped_base_ids = _get_stopped_base_medication_ids(db, pid)
     for med in med_rows:
         md = _row_to_dict(med)
+        base_id = int(md.get("medicationid", 0) or 0)
         medications.append({
-            "id": md.get("medicationid", 0),
+            "id": base_id,
             "name": str(md.get("drugname", "")).strip(),
             "dosage": str(md.get("dosage") or "—"),
             "schedule": str(md.get("frequency") or md.get("routeadmin") or "—"),
-            "status": "Active",
+            "status": "Discontinued" if base_id in stopped_base_ids else "Active",
+            "_source": "eicu",
         })
+
+    # Add clinician-entered overlays
+    medications = _get_medication_overrides(db, pid) + medications
 
     # ── infusions ──────────────────────────────────────────────────────────
     inf_rows = db.execute(text("""

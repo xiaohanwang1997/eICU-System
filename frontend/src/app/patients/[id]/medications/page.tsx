@@ -1,5 +1,6 @@
 import { getPatient } from "@/services/api";
 import { PatientPageShell } from "@/components/patient-page-shell";
+import { DrugManagement } from "@/components/drug-management";
 
 export default async function MedicationsPage({ params }: { params: { id: string } }) {
   const patient = await getPatient(params.id);
@@ -7,24 +8,8 @@ export default async function MedicationsPage({ params }: { params: { id: string
   const infusions = patient.infusions ?? [];
   const allergies = patient.allergies ?? [];
 
-  // Detect allergy conflicts
-  const conflicts = meds.filter((m) =>
-    allergies.some((a) => m.name.toLowerCase().includes(a.toLowerCase()) || a.toLowerCase().includes(m.name.toLowerCase().split(" ")[0]))
-  );
-
   return (
     <PatientPageShell patientId={params.id} title={patient.full_name} subtitle="Medications & Infusions">
-
-      {/* Allergy warning */}
-      {conflicts.length > 0 && (
-        <div className="alert-box" style={{ borderColor: "#fca5a5", background: "#fff7f7" }}>
-          <span style={{ fontSize: "1.3rem" }}>🚨</span>
-          <div>
-            <strong style={{ color: "#b91c1c" }}>Potential allergy conflict:</strong>{" "}
-            <span className="muted">{conflicts.map((c) => c.name).join(", ")} — check against allergy list ({allergies.join(", ")})</span>
-          </div>
-        </div>
-      )}
 
       {/* Allergy list */}
       <div className="card">
@@ -38,40 +23,8 @@ export default async function MedicationsPage({ params }: { params: { id: string
         </div>
       </div>
 
-      {/* Medication orders */}
-      <div className="card">
-        <h3 className="section-title">Medication Orders ({meds.length})</h3>
-        {meds.length > 0 ? (
-          <div className="dashboard-table-wrap">
-            <table className="dashboard-table">
-              <thead>
-                <tr>
-                  <th>Drug Name</th>
-                  <th>Dosage</th>
-                  <th>Schedule / Route</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {meds.map((m) => (
-                  <tr key={m.id}>
-                    <td><strong>{m.name}</strong></td>
-                    <td>{m.dosage}</td>
-                    <td className="muted">{m.schedule}</td>
-                    <td>
-                      <span className={`dashboard-status ${m.status === "Active" ? "dashboard-status--stable" : ""}`} style={{ fontSize: "0.8rem" }}>
-                        {m.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="muted">No medication orders on file.</p>
-        )}
-      </div>
+      {/* Drug management (add / discontinue) */}
+      <DrugManagement patientId={params.id} initialMedications={meds} allergies={allergies} />
 
       {/* Infusion drugs */}
       <div className="card">

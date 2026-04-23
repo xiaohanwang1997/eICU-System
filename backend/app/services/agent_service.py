@@ -10,13 +10,21 @@ import json
 from collections.abc import AsyncGenerator, Iterator
 from typing import Any
 
-import anthropic
+try:
+    import anthropic  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    anthropic = None  # type: ignore
 
-_client: anthropic.Anthropic | None = None
+_client = None
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client():
     global _client
+    if anthropic is None:
+        raise RuntimeError(
+            "Anthropic SDK not installed. Run `pip install anthropic` in backend/.venv "
+            "or remove agent usage."
+        )
     if _client is None:
         import os
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
