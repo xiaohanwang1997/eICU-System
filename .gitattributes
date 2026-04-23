@@ -1,1 +1,2 @@
 backend/eicu.db filter=lfs diff=lfs merge=lfs -text
+eicu.db filter=lfs diff=lfs merge=lfs -text
