@@ -10,10 +10,16 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.services.patient_service import (
+    add_clinical_diagnosis,
+    add_clinical_note,
+    add_infusion_override,
     add_medication_override,
     get_patients,
     get_patient_detail,
+    stop_infusion,
     stop_medication,
+    update_clinical_diagnosis,
+    update_clinical_note,
 )
 from app.services.agent_service import stream_agent_response
 
@@ -85,7 +91,7 @@ def patient_detail(patient_id: int, db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# Drug management (overlay on top of eICU medication table)
+# Drug management (overlay on top of eICU medication / infusion tables)
 # ---------------------------------------------------------------------------
 
 
@@ -93,6 +99,11 @@ class AddMedicationRequest(BaseModel):
     name: str
     dosage: str | None = None
     schedule: str | None = None
+
+
+class AddInfusionRequest(BaseModel):
+    name: str
+    rate: str | None = None
 
 
 @router.post("/patients/{patient_id}/medications")
@@ -132,6 +143,164 @@ def discontinue_medication_route(patient_id: int, medication_id: int, db: Sessio
 @router.post("/patients/{patient_id}/medications/{medication_id}/stop")
 def stop_medication_route(patient_id: int, medication_id: int, db: Session = Depends(get_db)):
     return _discontinue_medication(patient_id, medication_id, db)
+
+
+# ---------------------------------------------------------------------------
+# Infusion management (overlay on top of eICU infusiondrug table)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/patients/{patient_id}/infusions")
+def add_infusion(patient_id: int, body: AddInfusionRequest, db: Session = Depends(get_db)):
+    patient = get_patient_detail(db, patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="Infusion name is required")
+
+    add_infusion_override(
+        db,
+        patientunitstayid=patient_id,
+        name=body.name.strip(),
+        rate=(body.rate.strip() if body.rate else None),
+    )
+    return get_patient_detail(db, patient_id)
+
+
+def _discontinue_infusion(patient_id: int, infusion_id: int, db: Session) -> dict:
+    patient = get_patient_detail(db, patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    stop_infusion(db, patientunitstayid=patient_id, infusion_id=infusion_id)
+    return get_patient_detail(db, patient_id)
+
+
+@router.post("/patients/{patient_id}/infusions/{infusion_id}/discontinue")
+def discontinue_infusion_route(patient_id: int, infusion_id: int, db: Session = Depends(get_db)):
+    return _discontinue_infusion(patient_id, infusion_id, db)
+
+
+# Backward-compatible alias
+@router.post("/patients/{patient_id}/infusions/{infusion_id}/stop")
+def stop_infusion_route(patient_id: int, infusion_id: int, db: Session = Depends(get_db)):
+    return _discontinue_infusion(patient_id, infusion_id, db)
+
+
+# ---------------------------------------------------------------------------
+# Clinical diagnosis (overlay; does not write to eICU `diagnosis` table)
+# ---------------------------------------------------------------------------
+
+
+class ClinicalDiagnosisRequest(BaseModel):
+    diagnosis: str
+    status: str
+    clinician: str | None = None
+
+
+@router.post("/patients/{patient_id}/diagnoses/clinical")
+def create_clinical_diagnosis(
+    patient_id: int, body: ClinicalDiagnosisRequest, db: Session = Depends(get_db)
+):
+    patient = get_patient_detail(db, patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    if not body.diagnosis.strip():
+        raise HTTPException(status_code=400, detail="Diagnosis is required")
+    try:
+        add_clinical_diagnosis(
+            db,
+            patientunitstayid=patient_id,
+            diagnosis=body.diagnosis,
+            status=body.status,
+            clinician=body.clinician,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return get_patient_detail(db, patient_id)
+
+
+@router.put("/patients/{patient_id}/diagnoses/clinical/{clinical_id}")
+def edit_clinical_diagnosis(
+    patient_id: int, clinical_id: int, body: ClinicalDiagnosisRequest, db: Session = Depends(get_db)
+):
+    patient = get_patient_detail(db, patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    if not body.diagnosis.strip():
+        raise HTTPException(status_code=400, detail="Diagnosis is required")
+    try:
+        update_clinical_diagnosis(
+            db,
+            patientunitstayid=patient_id,
+            clinical_id=clinical_id,
+            diagnosis=body.diagnosis,
+            status=body.status,
+            clinician=body.clinician,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return get_patient_detail(db, patient_id)
+
+
+# ---------------------------------------------------------------------------
+# Clinical notes (overlay; does not write to eICU `note` table)
+# ---------------------------------------------------------------------------
+
+
+class ClinicalNoteRequest(BaseModel):
+    content: str
+    note_type: str | None = "Clinician Note"
+    author: str | None = None
+
+
+@router.post("/patients/{patient_id}/notes/clinical")
+def create_clinical_note(
+    patient_id: int, body: ClinicalNoteRequest, db: Session = Depends(get_db)
+):
+    patient = get_patient_detail(db, patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    if not body.content.strip():
+        raise HTTPException(status_code=400, detail="Note content is required")
+    try:
+        add_clinical_note(
+            db,
+            patientunitstayid=patient_id,
+            author=body.author,
+            note_type=(body.note_type or "Clinician Note"),
+            content=body.content,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return get_patient_detail(db, patient_id)
+
+
+@router.put("/patients/{patient_id}/notes/clinical/{note_id}")
+def edit_clinical_note(
+    patient_id: int, note_id: int, body: ClinicalNoteRequest, db: Session = Depends(get_db)
+):
+    patient = get_patient_detail(db, patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    if not body.content.strip():
+        raise HTTPException(status_code=400, detail="Note content is required")
+    try:
+        update_clinical_note(
+            db,
+            patientunitstayid=patient_id,
+            note_id=note_id,
+            author=body.author,
+            note_type=(body.note_type or "Clinician Note"),
+            content=body.content,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return get_patient_detail(db, patient_id)
 
 
 # ---------------------------------------------------------------------------

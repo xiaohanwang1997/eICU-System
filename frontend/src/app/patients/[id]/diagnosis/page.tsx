@@ -1,11 +1,14 @@
 import { getPatient } from "@/services/api";
 import { PatientPageShell } from "@/components/patient-page-shell";
+import { DiagnosisManagement } from "@/components/diagnosis-management";
 
 export default async function DiagnosisPage({ params }: { params: { id: string } }) {
   const patient = await getPatient(params.id);
   const diagnoses = patient.diagnoses ?? [];
-  const active = diagnoses.filter((d) => d.status === "Active" || d.status === "Confirmed");
-  const resolved = diagnoses.filter((d) => d.status !== "Active" && d.status !== "Confirmed");
+  const eicuDiagnoses = diagnoses.filter((d) => d._source !== "clinical");
+  const clinicalDiagnoses = diagnoses.filter((d) => d._source === "clinical");
+  const active = eicuDiagnoses.filter((d) => d.status === "Active" || d.status === "Confirmed");
+  const resolved = eicuDiagnoses.filter((d) => d.status !== "Active" && d.status !== "Confirmed");
 
   return (
     <PatientPageShell patientId={params.id} title={patient.full_name} subtitle="Diagnosis / Problem List">
@@ -16,9 +19,11 @@ export default async function DiagnosisPage({ params }: { params: { id: string }
         <div style={{ fontSize: "1.25rem", fontWeight: 700 }}>{patient.primary_diagnosis}</div>
       </div>
 
-      {/* Active diagnoses */}
+      <DiagnosisManagement patientId={params.id} initial={clinicalDiagnoses} />
+
+      {/* eICU-derived diagnoses (read-only) */}
       <div className="card">
-        <h3 className="section-title">Active Problem List ({active.length})</h3>
+        <h3 className="section-title">eICU problem list – active ({active.length})</h3>
         {active.length > 0 ? (
           <div className="dashboard-table-wrap">
             <table className="dashboard-table">
@@ -42,14 +47,13 @@ export default async function DiagnosisPage({ params }: { params: { id: string }
             </table>
           </div>
         ) : (
-          <p className="muted">No active diagnoses on record.</p>
+          <p className="muted">No active eICU diagnoses on record.</p>
         )}
       </div>
 
-      {/* Resolved diagnoses */}
       {resolved.length > 0 && (
         <div className="card">
-          <h3 className="section-title">Resolved / Historical ({resolved.length})</h3>
+          <h3 className="section-title">eICU problem list – resolved / historical ({resolved.length})</h3>
           <div className="dashboard-table-wrap">
             <table className="dashboard-table">
               <thead>
@@ -84,7 +88,8 @@ export default async function DiagnosisPage({ params }: { params: { id: string }
 
       <div className="card">
         <p className="muted" style={{ margin: 0, fontSize: "0.875rem" }}>
-          Data from <strong>admissionDx</strong> (admission diagnosis path) and <strong>diagnosis</strong> (active/inactive diagnoses with ICD-9 codes and priority).
+          eICU tables are read-only in this app. <strong>Clinical problem list</strong> entries are saved locally in
+          the app database as an overlay and do not modify the original eICU extract.
         </p>
       </div>
 

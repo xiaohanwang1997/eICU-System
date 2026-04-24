@@ -102,6 +102,33 @@ def _ensure_drug_management_tables(db: Session) -> None:
             """
         )
     )
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS infusion_overrides (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              patientunitstayid INTEGER NOT NULL,
+              name TEXT NOT NULL,
+              rate TEXT,
+              status TEXT NOT NULL DEFAULT 'Running',
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+    )
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS infusion_stops (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              patientunitstayid INTEGER NOT NULL,
+              infusiondrugid INTEGER NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              UNIQUE(patientunitstayid, infusiondrugid)
+            )
+            """
+        )
+    )
     db.commit()
 
 
@@ -208,6 +235,357 @@ def _get_medication_overrides(db: Session, pid: int) -> list[dict]:
             }
         )
     return result
+
+
+# Infusion overlay (1_500_000_000 + id) — different namespace from medication overrides
+_INFUSION_ID_OFFSET = 500_000_000
+
+
+def add_infusion_override(
+    db: Session, *, patientunitstayid: int, name: str, rate: str | None
+) -> dict:
+    _ensure_drug_management_tables(db)
+    res = db.execute(
+        text(
+            """
+            INSERT INTO infusion_overrides (patientunitstayid, name, rate, status)
+            VALUES (:pid, :name, :rate, 'Running')
+            """
+        ),
+        {"pid": patientunitstayid, "name": name, "rate": rate},
+    )
+    db.commit()
+    new_id = int(getattr(res, "lastrowid", 0) or 0)
+    return {
+        "id": _INFUSION_ID_OFFSET + new_id,
+        "name": name,
+        "rate": rate or "—",
+        "status": "Running",
+        "_source": "override",
+    }
+
+
+def stop_infusion(db: Session, *, patientunitstayid: int, infusion_id: int) -> None:
+    """
+    Discontinues either:
+    - an override infusion (500_000_000 + overrides.id), OR
+    - a base eICU infusiondrug.infusiondrugid (stored in infusion_stops).
+    """
+    _ensure_drug_management_tables(db)
+    if infusion_id >= _INFUSION_ID_OFFSET:
+        override_id = infusion_id - _INFUSION_ID_OFFSET
+        db.execute(
+            text(
+                """
+                UPDATE infusion_overrides
+                SET status = 'Discontinued'
+                WHERE id = :oid AND patientunitstayid = :pid
+                """
+            ),
+            {"oid": override_id, "pid": patientunitstayid},
+        )
+        db.commit()
+        return
+
+    db.execute(
+        text(
+            """
+            INSERT OR IGNORE INTO infusion_stops (patientunitstayid, infusiondrugid)
+            VALUES (:pid, :iid)
+            """
+        ),
+        {"pid": patientunitstayid, "iid": infusion_id},
+    )
+    db.commit()
+
+
+def _get_stopped_base_infusion_ids(db: Session, pid: int) -> set[int]:
+    _ensure_drug_management_tables(db)
+    rows = db.execute(
+        text(
+            """
+            SELECT infusiondrugid
+            FROM infusion_stops
+            WHERE patientunitstayid = :pid
+            """
+        ),
+        {"pid": pid},
+    ).fetchall()
+    return {int(r[0]) for r in rows if r and r[0] is not None}
+
+
+def _get_infusion_overrides(db: Session, pid: int) -> list[dict]:
+    _ensure_drug_management_tables(db)
+    rows = db.execute(
+        text(
+            """
+            SELECT id, name, rate, status
+            FROM infusion_overrides
+            WHERE patientunitstayid = :pid
+            ORDER BY id DESC
+            LIMIT 50
+            """
+        ),
+        {"pid": pid},
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        d = _row_to_dict(r)
+        oid = int(d.get("id") or 0)
+        out.append(
+            {
+                "id": _INFUSION_ID_OFFSET + oid,
+                "name": str(d.get("name") or "").strip(),
+                "rate": str(d.get("rate") or "—"),
+                "status": str(d.get("status") or "Running"),
+                "_source": "override",
+            }
+        )
+    return out
+
+
+# Clinical diagnosis overlay (2_000_000_000 + id) — does not modify eICU `diagnosis` table
+_CLINICAL_DIAGNOSIS_ID_OFFSET = 2_000_000_000
+_ALLOWED_CLINICAL_DX_STATUS = {"Active", "Resolved", "Confirmed"}
+
+
+def _ensure_clinical_diagnosis_table(db: Session) -> None:
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS diagnosis_clinical (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              patientunitstayid INTEGER NOT NULL,
+              diagnosis TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'Active',
+              clinician TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+    )
+    db.commit()
+
+
+def _get_clinical_diagnoses(db: Session, pid: int) -> list[dict]:
+    _ensure_clinical_diagnosis_table(db)
+    rows = db.execute(
+        text(
+            """
+            SELECT id, diagnosis, status, clinician
+            FROM diagnosis_clinical
+            WHERE patientunitstayid = :pid
+            ORDER BY id ASC
+            LIMIT 50
+            """
+        ),
+        {"pid": pid},
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        d = _row_to_dict(r)
+        oid = int(d.get("id") or 0)
+        out.append(
+            {
+                "id": _CLINICAL_DIAGNOSIS_ID_OFFSET + oid,
+                "diagnosis": str(d.get("diagnosis") or "").strip(),
+                "status": str(d.get("status") or "Active"),
+                "clinician": (str(d.get("clinician")).strip() if d.get("clinician") else "—"),
+                "_source": "clinical",
+            }
+        )
+    return out
+
+
+def add_clinical_diagnosis(
+    db: Session,
+    *,
+    patientunitstayid: int,
+    diagnosis: str,
+    status: str,
+    clinician: str | None,
+) -> None:
+    _ensure_clinical_diagnosis_table(db)
+    st = status.strip()
+    if st not in _ALLOWED_CLINICAL_DX_STATUS:
+        raise ValueError("Invalid status")
+    db.execute(
+        text(
+            """
+            INSERT INTO diagnosis_clinical (patientunitstayid, diagnosis, status, clinician, updated_at)
+            VALUES (:pid, :dx, :st, :clin, datetime('now'))
+            """
+        ),
+        {
+            "pid": patientunitstayid,
+            "dx": diagnosis.strip(),
+            "st": st,
+            "clin": (clinician.strip() if clinician else None),
+        },
+    )
+    db.commit()
+
+
+def update_clinical_diagnosis(
+    db: Session,
+    *,
+    patientunitstayid: int,
+    clinical_id: int,
+    diagnosis: str,
+    status: str,
+    clinician: str | None,
+) -> None:
+    if clinical_id < _CLINICAL_DIAGNOSIS_ID_OFFSET:
+        raise ValueError("Not a clinical diagnosis id")
+    local_id = clinical_id - _CLINICAL_DIAGNOSIS_ID_OFFSET
+    st = status.strip()
+    if st not in _ALLOWED_CLINICAL_DX_STATUS:
+        raise ValueError("Invalid status")
+    _ensure_clinical_diagnosis_table(db)
+    res = db.execute(
+        text(
+            """
+            UPDATE diagnosis_clinical
+            SET diagnosis = :dx,
+                status = :st,
+                clinician = :clin,
+                updated_at = datetime('now')
+            WHERE id = :lid AND patientunitstayid = :pid
+            """
+        ),
+        {
+            "dx": diagnosis.strip(),
+            "st": st,
+            "clin": (clinician.strip() if clinician else None),
+            "lid": local_id,
+            "pid": patientunitstayid,
+        },
+    )
+    db.commit()
+    if int(getattr(res, "rowcount", 0) or 0) == 0:
+        raise LookupError("Clinical diagnosis not found")
+
+
+# Clinical notes overlay (3_000_000_000 + id) — does not modify eICU `note` table
+_CLINICAL_NOTE_ID_OFFSET = 3_000_000_000
+
+
+def _ensure_clinical_note_table(db: Session) -> None:
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS note_clinical (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              patientunitstayid INTEGER NOT NULL,
+              author TEXT,
+              notetype TEXT NOT NULL DEFAULT 'Clinician Note',
+              notetext TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+    )
+    db.commit()
+
+
+def _get_clinical_notes(db: Session, pid: int) -> list[dict]:
+    _ensure_clinical_note_table(db)
+    rows = db.execute(
+        text(
+            """
+            SELECT id, author, notetype, notetext
+            FROM note_clinical
+            WHERE patientunitstayid = :pid
+            ORDER BY id DESC
+            LIMIT 50
+            """
+        ),
+        {"pid": pid},
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        d = _row_to_dict(r)
+        oid = int(d.get("id") or 0)
+        body = str(d.get("notetext") or "")
+        out.append(
+            {
+                "id": _CLINICAL_NOTE_ID_OFFSET + oid,
+                "author": str(d.get("author") or "Clinician").strip() or "Clinician",
+                "note_type": str(d.get("notetype") or "Clinician Note"),
+                "content": body,
+                "_source": "clinical",
+            }
+        )
+    return out
+
+
+def add_clinical_note(
+    db: Session,
+    *,
+    patientunitstayid: int,
+    author: str | None,
+    note_type: str,
+    content: str,
+) -> None:
+    _ensure_clinical_note_table(db)
+    if not content.strip():
+        raise ValueError("Note content is required")
+    db.execute(
+        text(
+            """
+            INSERT INTO note_clinical (patientunitstayid, author, notetype, notetext, updated_at)
+            VALUES (:pid, :author, :ntype, :ntext, datetime('now'))
+            """
+        ),
+        {
+            "pid": patientunitstayid,
+            "author": (author.strip() if author else None),
+            "ntype": (note_type.strip() or "Clinician Note"),
+            "ntext": content.strip(),
+        },
+    )
+    db.commit()
+
+
+def update_clinical_note(
+    db: Session,
+    *,
+    patientunitstayid: int,
+    note_id: int,
+    author: str | None,
+    note_type: str,
+    content: str,
+) -> None:
+    if note_id < _CLINICAL_NOTE_ID_OFFSET:
+        raise ValueError("Not a clinical note id")
+    local_id = note_id - _CLINICAL_NOTE_ID_OFFSET
+    if not content.strip():
+        raise ValueError("Note content is required")
+    _ensure_clinical_note_table(db)
+    res = db.execute(
+        text(
+            """
+            UPDATE note_clinical
+            SET author = :author,
+                notetype = :ntype,
+                notetext = :ntext,
+                updated_at = datetime('now')
+            WHERE id = :lid AND patientunitstayid = :pid
+            """
+        ),
+        {
+            "author": (author.strip() if author else None),
+            "ntype": (note_type.strip() or "Clinician Note"),
+            "ntext": content.strip(),
+            "lid": local_id,
+            "pid": patientunitstayid,
+        },
+    )
+    db.commit()
+    if int(getattr(res, "rowcount", 0) or 0) == 0:
+        raise LookupError("Clinical note not found")
 
 
 # ---------------------------------------------------------------------------
@@ -376,10 +754,20 @@ def get_patient_detail(db: Session, pid: int) -> dict | None:
             "diagnosis": label,
             "status": "Active" if dxd.get("activeupondischarge") else "Resolved",
             "clinician": "Attending",
+            "_source": "eicu",
         })
 
     if not diagnoses:
-        diagnoses = [{"id": 1, "diagnosis": str(primary_dx), "status": "Active", "clinician": "Attending"}]
+        diagnoses = [{
+            "id": 1,
+            "diagnosis": str(primary_dx),
+            "status": "Active",
+            "clinician": "Attending",
+            "_source": "eicu",
+        }]
+
+    # App-entered / editable diagnoses (overlay; does not modify eICU tables)
+    diagnoses = diagnoses + _get_clinical_diagnoses(db, pid)
 
     # ── allergies ──────────────────────────────────────────────────────────
     allergy_rows = db.execute(text("""
@@ -428,15 +816,21 @@ def get_patient_detail(db: Session, pid: int) -> dict | None:
         LIMIT 10
     """), {"pid": pid}).fetchall()
     infusions = []
+    stopped_infusion_ids = _get_stopped_base_infusion_ids(db, pid)
     for inf in inf_rows:
         ifd = _row_to_dict(inf)
+        iid = int(ifd.get("infusiondrugid", 0) or 0)
         rate = ifd.get("drugrate") or ifd.get("infusionrate") or "—"
         infusions.append({
-            "id": ifd.get("infusiondrugid", 0),
+            "id": iid,
             "name": str(ifd.get("drugname", "")).strip(),
             "rate": str(rate),
-            "status": "Running",
+            "status": "Discontinued" if iid in stopped_infusion_ids else "Running",
+            "_source": "eicu",
         })
+
+    # Add clinician-entered infusions
+    infusions = _get_infusion_overrides(db, pid) + infusions
 
     # ── intake / output ────────────────────────────────────────────────────
     io_row = db.execute(text("""
@@ -581,7 +975,10 @@ def get_patient_detail(db: Session, pid: int) -> dict | None:
             "author": "Clinician",
             "note_type": str(ntd.get("notetype") or "Note"),
             "content": str(ntd.get("notetext") or "")[:400],
+            "_source": "eicu",
         })
+
+    notes = notes + _get_clinical_notes(db, pid)
 
     # ── treatments ─────────────────────────────────────────────────────────
     tx_rows = db.execute(text("""

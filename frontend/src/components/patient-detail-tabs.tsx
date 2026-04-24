@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { AgentChatPanel } from "@/components/agent-chat-panel";
 import { VitalTrendsChart } from "@/components/vital-trends-chart";
+import { patientEicuStyleNoteType } from "@/lib/eicu-note-display";
 import type { PatientDetail } from "@/types";
 
 type PatientDetailTabsProps = {
@@ -280,7 +281,7 @@ export function PatientDetailTabs({
                   <ul>
                     {patient.notes.map((note) => (
                       <li key={note.id}>
-                        <strong>{note.note_type}:</strong> {note.content}
+                        <strong>{patientEicuStyleNoteType(note)}:</strong> {note.content}
                       </li>
                     ))}
                   </ul>

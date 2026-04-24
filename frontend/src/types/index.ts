@@ -25,6 +25,8 @@ export type DiagnosisRecord = {
   diagnosis: string;
   status: string;
   clinician: string;
+  /** eICU dataset row vs app-entered clinical overlay */
+  _source?: "eicu" | "clinical";
 };
 
 export type ClinicalNote = {
@@ -32,6 +34,8 @@ export type ClinicalNote = {
   author: string;
   note_type: string;
   content: string;
+  /** eICU dataset `note` rows vs app-entered `note_clinical` overlay */
+  _source?: "eicu" | "clinical";
 };
 
 export type InfusionRecord = {
