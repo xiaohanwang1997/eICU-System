@@ -593,6 +593,7 @@ def update_clinical_note(
 # ---------------------------------------------------------------------------
 
 def get_patients(db: Session, q: str | None = None) -> list[dict]:
+    q = None
     sql = text("""
         SELECT
             p.patientunitstayid,
